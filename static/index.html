@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Dynamic MSE Streaming Demo</title>
+        <style>
+            .queue-item { margin: 5px 0; padding: 5px; background: #f0f0f0; }
+            #status { margin: 10px 0; padding: 10px; background: #e0e0e0; }
+            #queue { margin: 10px 0; }
+            .current-file { font-weight: bold; color: #2196F3; }
+            .error { color: red; }
+        </style>
+    </head>
+    <body>
+        <h1>Dynamic MP3 Streaming</h1>
+        <div id="status">Not connected</div>
+        <div id="error" class="error"></div>
+        <audio id="audio" controls></audio>
+        <div>
+            <button onclick="addFile()">Add File</button>
+            <button onclick="stopStreaming()">Stop</button>
+        </div>
+        <h3>Now Playing:</h3>
+        <div id="current-file">None</div>
+        <h3>Queue:</h3>
+        <div id="queue"></div>
+        
+        <script>
+            let ws;
+            let mediaSource;
+            let sourceBuffer;
+            let queue = [];
+            let isPlaying = false;
+            
+            function connect() {
+                ws = new WebSocket('ws://' + window.location.host + '/ws');
+                
+                ws.onopen = function() {
+                    document.getElementById('status').textContent = 'Connected';
+                    document.getElementById('error').textContent = '';
+                    setupMediaSource();
+                };
+                
+                ws.onmessage = async function(event) {
+                    if (event.data instanceof Blob) {
+                        const chunk = await event.data.arrayBuffer();
+                        appendChunk(chunk);
+                    } else {
+                        const message = JSON.parse(event.data);
+                        handleMessage(message);
+                    }
+                };
+                
+                ws.onclose = function() {
+                    document.getElementById('status').textContent = 'Disconnected';
+                    setTimeout(connect, 1000);
+                };
+                
+                ws.onerror = function(error) {
+                    console.error('WebSocket error:', error);
+                    document.getElementById('error').textContent = 'WebSocket error occurred';
+                };
+            }
+            
+            function setupMediaSource() {
+                const audio = document.getElementById('audio');
+                mediaSource = new MediaSource();
+                audio.src = URL.createObjectURL(mediaSource);
+                
+                mediaSource.addEventListener('sourceopen', function() {
+                    console.log('MediaSource opened');
+                    sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
+                    
+                    sourceBuffer.addEventListener('updateend', function() {
+                        if (queue.length > 0 && !sourceBuffer.updating) {
+                            const chunk = queue.shift();
+                            sourceBuffer.appendBuffer(chunk);
+                        }
+                    });
+                });
+                
+                mediaSource.addEventListener('error', function(e) {
+                    console.error('MediaSource error:', e);
+                    document.getElementById('error').textContent = 'MediaSource error occurred';
+                });
+            }
+            
+            async function appendChunk(chunk) {
+                if (!sourceBuffer || sourceBuffer.updating) {
+                    queue.push(chunk);
+                    console.log('Queued chunk, total queued:', queue.length);
+                } else {
+                    try {
+                        sourceBuffer.appendBuffer(chunk);
+                        console.log('Appended chunk directly');
+                    } catch (e) {
+                        console.error('Error appending buffer:', e);
+                        queue.push(chunk);
+                    }
+                }
+            }
+            
+            function updateQueueDisplay(queueList = [], currentFile = null) {
+                const queueDiv = document.getElementById('queue');
+                const currentFileDiv = document.getElementById('current-file');
+                
+                currentFileDiv.textContent = currentFile || 'None';
+                queueDiv.innerHTML = queueList.map(file => 
+                    `<div class="queue-item">${file}</div>`
+                ).join('');
+                
+                console.log('Updated queue display:', { currentFile, queueList });
+            }
+            
+            function handleMessage(message) {
+                console.log('Received message:', message);
+                
+                switch(message.type) {
+                    case 'message':
+                        document.getElementById('status').textContent = message.content;
+                        // Update queue display if queue info is provided
+                        if (message.queue !== undefined) {
+                            updateQueueDisplay(message.queue, message.current_file);
+                        }
+                        break;
+                    case 'header':
+                        console.log('Received header:', message.size, 'bytes');
+                        break;
+                    case 'chunk':
+                        console.log('Receiving chunk:', message.size, 'bytes');
+                        break;
+                }
+                
+                // Auto-play when we receive the first chunk
+                if (!isPlaying && document.getElementById('audio').paused) {
+                    document.getElementById('audio').play().catch(e => {
+                        console.error('Error auto-playing:', e);
+                        document.getElementById('error').textContent = 'Auto-play failed: ' + e.message;
+                    });
+                    isPlaying = true;
+                }
+            }
+            
+            function stopStreaming() {
+                isPlaying = false;
+                document.getElementById('audio').pause();
+                if (mediaSource.readyState === 'open') {
+                    try {
+                        mediaSource.endOfStream();
+                    } catch (e) {
+                        console.error('Error ending stream:', e);
+                        document.getElementById('error').textContent = 'Error stopping stream: ' + e.message;
+                    }
+                }
+            }
+            
+            function addFile() {
+                const file_path = prompt('Enter file path:');
+                if (file_path) {
+                    console.log('Sending add_file request:', file_path);
+                    ws.send(JSON.stringify({
+                        action: 'add_file',
+                        file_path: file_path
+                    }));
+                }
+            }
+            
+            // Connect when page loads
+            connect();
+        </script>
+    </body>
+</html>
